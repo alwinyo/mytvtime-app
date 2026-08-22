@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#08090C">
+<title>My TV Time</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css?v=9">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+</head>
+<body>
+
+<!-- First-run setup. Keys live in this browser only, never in the repo. -->
+<section id="setup" hidden>
+  <div class="setup-card">
+    <h1 class="setup-title">Connect your library</h1>
+    <p class="setup-sub">These keys stay on this device. They are never sent
+       anywhere except Supabase and TMDB, and never stored in the code.</p>
+    <label>Supabase URL
+      <input id="cfg-url" type="url" placeholder="https://xxxx.supabase.co" autocomplete="off">
+    </label>
+    <label>Supabase anon key
+      <input id="cfg-key" type="password" placeholder="eyJhbGci..." autocomplete="off">
+    </label>
+    <label>TMDB API key
+      <input id="cfg-tmdb" type="password" placeholder="TMDB v3 key" autocomplete="off">
+    </label>
+    <label>Football key <em>(optional)</em>
+      <input id="cfg-football" type="password" placeholder="football-data.org token" autocomplete="off">
+    </label>
+    <button id="cfg-save" class="btn-primary">Connect</button>
+    <p id="cfg-error" class="setup-error" hidden></p>
+  </div>
+</section>
+
+<!-- Main app -->
+<main id="app" hidden>
+  <div id="view" class="view"></div>
+  <button id="btn-refresh" class="fab" aria-label="Refresh">↻</button>
+
+  <nav id="tabbar" role="tablist">
+    <button role="tab" data-view="next"    aria-selected="true">Next</button>
+    <button role="tab" data-view="soon"    aria-selected="false">Soon</button>
+    <button role="tab" data-view="search"  aria-selected="false">Search</button>
+    <button role="tab" data-view="library" aria-selected="false">Library</button>
+    <button role="tab" data-view="me"      aria-selected="false">Me</button>
+  </nav>
+</main>
+
+<!-- Detail sheet -->
+<div id="sheet-backdrop" hidden></div>
+<section id="sheet" hidden aria-modal="true" role="dialog">
+  <button id="sheet-close" aria-label="Close">✕</button>
+  <div id="sheet-body"></div>
+</section>
+
+<div id="toast" hidden></div>
+<pre id="fatal" hidden></pre>
+
+<script>
+// A blank page means a script never ran. Show the reason instead of nothing.
+window.addEventListener('error', function (e) {
+  var box = document.getElementById('fatal');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = 'Load error: ' + (e.message || e.type) +
+    (e.filename ? '  [' + e.filename.split('/').pop() + ':' + e.lineno + ']' : '');
+});
+window.addEventListener('unhandledrejection', function (e) {
+  var box = document.getElementById('fatal');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = 'Error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
+});
+</script>
+<script src="app.js?v=9"></script>
+<script>
+// If app.js failed to load or parse, boot() never ran and both panels stay
+// hidden — a white page. Detect that and say so.
+setTimeout(function () {
+  var setup = document.getElementById('setup'), app = document.getElementById('app');
+  if (setup && app && setup.hidden && app.hidden) {
+    var box = document.getElementById('fatal');
+    if (box) {
+      box.hidden = false;
+      box.textContent = 'app.js did not run. It is probably cached or missing — ' +
+        'pull down to refresh, or clear this site\'s data and reopen.';
+    }
+  }
+}, 1500);
+</script>
+</body>
+</html>
