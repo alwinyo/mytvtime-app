@@ -1942,3 +1942,29 @@ body { font-feature-settings: 'cv11', 'ss03'; letter-spacing: -0.006em; }
 
 /* grain is neutral grey noise only */
 .sv.ink::after { mix-blend-mode: soft-light; opacity: .18; }
+
+/* ====================================================================
+   MEMORY — lighter rendering for the recap
+   Chrome gives every independently animating element, every blend mode
+   and every filter its own off-screen layer. Hundreds of them on a phone
+   is how a tab gets killed.
+   ==================================================================== */
+/* the barcode grows as ONE element: a single wipe, not 365 animations */
+.sv-card.in .barcode i { animation: none !important; }
+.sv-card.in .barcode { animation: svWipe .9s var(--ease) both; }
+@keyframes svWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+
+/* grain without a blend mode: same texture, no extra full-screen layer */
+.sv::after, .sv.ink::after { mix-blend-mode: normal !important; opacity: .07 !important; }
+
+/* no filters on full-screen backdrops */
+.sv.has-bg::before { filter: none !important; transform: none !important; }
+
+/* the poster wall fades in once, as a whole */
+.sv-card.in .sv-mosaic img { animation: none !important; }
+.sv-card.in .sv-mosaic { animation: svFade .8s ease both; }
+@keyframes svFade { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sv-card.in .barcode, .sv-card.in .sv-mosaic { animation: none !important; }
+}

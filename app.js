@@ -13,7 +13,7 @@
 
 'use strict';
 
-const BUILD = '2026-10-18-f';      // shown in Me -> Data; bump on every upload
+const BUILD = '2026-10-18-g';      // shown in Me -> Data; bump on every upload
 const CFG_KEY = 'mytv.cfg';
 const TMDB_TTL = 12 * 3600 * 1000;
 const FOOTBALL_TTL = 3600 * 1000;
@@ -69,7 +69,22 @@ let db = { shows: [], movies: [], analytics: {}, seen_recaps: [], legacy: [] };
 let history = [];
 let historyTableMissing = false;
 let historyComplete = false;
-let historyLoadError = '';         // set when later pages could not be fetched
+let historyLoadError = '';
+
+/* ------------------------------------------------------------------
+   CRASH GUARD
+   Chrome's "Aw, Snap!" kills the tab outright, so no code runs to record
+   it. Instead each launch writes a marker and removes it once the app has
+   run steadily for 15 seconds. A marker still present at the next launch
+   means the last one died — so this launch runs in safe mode: no recap
+   pop-up and no background colour sampling, with a quiet note saying so.
+   ------------------------------------------------------------------ */
+let safeMode = false;
+try {
+  safeMode = !!localStorage.getItem('mytv.booting');
+  localStorage.setItem('mytv.booting', String(Date.now()));
+  setTimeout(() => { try { localStorage.removeItem('mytv.booting'); } catch { /* ignore */ } }, 15000);
+} catch { /* storage unavailable: carry on normally */ }         // set when later pages could not be fetched
 
 /** Try a few times before giving up. A single slow page used to stop the
     whole history load silently, leaving every stat quietly incomplete. */
@@ -1114,9 +1129,9 @@ function fixturePosterHtml(row) {
   const g = row.match || {};
   const c = 'width:44%;max-width:52px;aspect-ratio:1;object-fit:contain;filter:drop-shadow(0 3px 6px rgba(0,0,0,.6));';
   let inner = '';
-  if (g.home_crest) inner += `<img src="${g.home_crest}" style="${c}">`;
+  if (g.home_crest) inner += `<img loading="lazy" decoding="async" src="${g.home_crest}" style="${c}">`;
   inner += '<span style="color:var(--accent);font-size:.62rem;font-weight:900;margin:0 3px;opacity:.85">v</span>';
-  if (g.away_crest) inner += `<img src="${g.away_crest}" style="${c}">`;
+  if (g.away_crest) inner += `<img loading="lazy" decoding="async" src="${g.away_crest}" style="${c}">`;
   return `<div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 32%,#232A3A,#0B0E14 78%);
     display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:10px 8px 34px">
     <div style="font-size:.5rem;font-weight:900;letter-spacing:.16em;color:var(--accent);text-transform:uppercase;opacity:.9">
@@ -1516,7 +1531,7 @@ function providerRows(groups) {
   return '<div class="section-head">Where to watch</div>' + groups.map(([label, items]) =>
     `<div class="prov"><span>${label}</span><span>` +
     items.slice(0, 8).filter(p => p.logo_path)
-      .map(p => `<img src="${imgUrl(p.logo_path, 'w92')}" title="${esc(p.provider_name)}">`).join('') +
+      .map(p => `<img loading="lazy" decoding="async" src="${imgUrl(p.logo_path, 'w92')}" title="${esc(p.provider_name)}">`).join('') +
     '</span></div>').join('');
 }
 
@@ -1622,7 +1637,7 @@ function cwCard(r, opts = {}) {
     <div class="cw-under"><span>✓</span><b>Watched</b></div>
     <div class="cw-card" role="button" tabindex="0">
       ${r.src === 'football' ? fixturePosterHtml(r)
-        : art ? `<img class="cw-art${wide ? '' : ' cw-poster'}" src="${imgUrl(art, wide ? 'w780' : 'w500')}" alt="">` : ''}
+        : art ? `<img loading="lazy" decoding="async" class="cw-art${wide ? '' : ' cw-poster'}" src="${imgUrl(art, wide ? 'w780' : 'w500')}" alt="">` : ''}
       <span class="cw-shade"></span>
       <span class="cw-text">
         <span class="cw-code">${esc(r.src === 'football' ? 'Matchday ' + (r.matchday ?? '') : r.movie ? 'Film' : (r.code || ''))}
@@ -2607,10 +2622,10 @@ function recapSlidesV2(ins, colours, palette, people, art = {}) {
     return '';
   };
   const keyOf = (show) => show ? 'tv:' + show.id : '';
-  const mosaic = ranked.slice(0, 12).map(tall).filter(Boolean);
+  const mosaic = ranked.slice(0, 12).map(tall).filter(Boolean).map(u => u.replace('/w500/', '/w185/'));
 
   const label = ins.isYear ? ins.prefix : prettyMonth(ins.prefix);
-  const P = (it, size = 'w342') => it && it.poster_path ? `<img src="${imgUrl(it.poster_path, size)}" alt="">` : '';
+  const P = (it, size = 'w342') => it && it.poster_path ? `<img loading="lazy" decoding="async" src="${imgUrl(it.poster_path, size)}" alt="">` : '';
   const gap = (d) => { const y = Math.floor(d / 365), m = Math.floor((d % 365) / 30);
     return [y ? `${y} year${y > 1 ? 's' : ''}` : '', m ? `${m} month${m > 1 ? 's' : ''}` : ''].filter(Boolean).join(' ') || `${d} days`; };
   const fmtDay = (d) => new Date(d.slice(0, 10) + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
@@ -2635,7 +2650,7 @@ function recapSlidesV2(ins, colours, palette, people, art = {}) {
 
   return [
     { chapter: 'Cover', cls: 'sv-cover', html: () => `
-      ${mosaic.length >= 4 ? `<div class="sv-mosaic">${mosaic.concat(mosaic).slice(0, 15).map(u => `<img src="${u}" alt="">`).join('')}</div>` : ''}
+      ${mosaic.length >= 4 ? `<div class="sv-mosaic">${mosaic.concat(mosaic).slice(0, 15).map(u => `<img loading="lazy" decoding="async" src="${u}" alt="">`).join('')}</div>` : ''}
       <div class="sv-ghost">${esc(ghost)}</div>
       <div class="sv-eyebrow">${ins.isYear ? 'Your year on screen' : 'Your month on screen'}</div>
       <div class="sv-title">${esc(label)}</div>
@@ -2690,7 +2705,7 @@ function recapSlidesV2(ins, colours, palette, people, art = {}) {
 
     (people || fav) ? { chapter: 'Faces', html: `
       <div class="sv-eyebrow">Faces</div>
-      ${people ? `<div class="sv-face duo">${people.p ? `<img src="${imgUrl(people.p, 'w342')}" alt="">` : ''}</div>
+      ${people ? `<div class="sv-face duo">${people.p ? `<img loading="lazy" decoding="async" src="${imgUrl(people.p, 'w342')}" alt="">` : ''}</div>
         <div class="sv-h big">${esc(people.name)}</div>
         <div class="sv-lede">${serif(`on your screen the most${people.titles.length ? ` — in ${people.titles.slice(0, 2).join(' and ')}` : ''}`)}</div>` : ''}
       ${fav ? `<div class="sv-note">Your favourite character: <b>${esc(fav.c)}</b>, picked ${fav.count}×.</div>` : ''}` } : null,
@@ -2922,7 +2937,12 @@ async function openRecapV2(prefix, recapId) {
       const box = stage.querySelector('.sv-sharebox');
       try {
         cardBlob = await renderShareCard(ins, colours, palette);
-        if (box) { box.innerHTML = ''; const im = new Image(); im.src = URL.createObjectURL(cardBlob); im.alt = 'Your share card'; box.appendChild(im); }
+        if (box) {
+          box.innerHTML = '';
+          const im = new Image(); const url = URL.createObjectURL(cardBlob);
+          im.src = url; im.alt = 'Your share card'; box.appendChild(im);
+          setTimeout(() => URL.revokeObjectURL(url), 60000);   // don't hold an 8 MB image forever
+        }
       } catch (e) {
         if (box) box.innerHTML = `<div class="sv-spinner">Couldn't build the image — ${esc(String(e.message || e).slice(0, 50))}</div>`;
       }
@@ -2937,7 +2957,9 @@ async function openRecapV2(prefix, recapId) {
   });
 
   // second wave: everything else, painting barcode stripes as each colour lands
-  mapLimit(keys.slice(10), 4, async k => {
+  // Bounded: a year can involve hundreds of titles, each one an image to
+  // decode. Sixty is plenty to colour a barcode; the rest stay neutral.
+  if (!safeMode) mapLimit(keys.slice(10, 70), 2, async k => {
     if (colours[k]) return;
     const c = await colourFor(k);
     if (c) { colours[k] = c; story.repaintBarcode(k, c); }
@@ -3045,7 +3067,7 @@ function profileHeader(v) {
 
   const head = el('div', 'profile');
   head.innerHTML = `
-    <div class="pf-banner">${top && top.poster_path ? `<img class="pf-blur" src="${imgUrl(top.poster_path, 'w500')}" alt="">` : ''}</div>
+    <div class="pf-banner">${top && top.poster_path ? `<img loading="lazy" decoding="async" class="pf-blur" src="${imgUrl(top.poster_path, 'w500')}" alt="">` : ''}</div>
     <div class="pf-shade"></div>
     <div class="pf-body">
       <div class="pf-avatar">${esc(name.slice(0, 1).toUpperCase())}</div>
@@ -3145,7 +3167,7 @@ async function renderInsights(body, root) {
     mvps.forEach(m => {
       const c = el('div', 'mvp');
       const show = getShow([...m.shows][0]);
-      c.innerHTML = `<span class="mvp-ph">${m.p ? `<img src="${imgUrl(m.p, 'w185')}" alt="">` : ''}</span>
+      c.innerHTML = `<span class="mvp-ph">${m.p ? `<img loading="lazy" decoding="async" src="${imgUrl(m.p, 'w185')}" alt="">` : ''}</span>
         <b>${esc(m.c)}</b><small>${esc(show ? show.name : m.n)}</small><i>${m.count}×</i>`;
       row.appendChild(c);
     });
@@ -3185,7 +3207,7 @@ function renderYear(v) {
       line.innerHTML = `<div class="otd-year">${ago} year${ago > 1 ? 's' : ''} ago</div>` +
         items.slice(0, 4).map(h => {
           const o = h.type === 'tv' ? getShow(h.item) : getMovie(h.item);
-          return `<div class="otd-row"><img src="${imgUrl(o?.poster_path, 'w185')}" alt="">
+          return `<div class="otd-row"><img loading="lazy" decoding="async" src="${imgUrl(o?.poster_path, 'w185')}" alt="">
             <span><b>${esc(o?.name || 'Unknown')}</b><i>${esc(h.code || 'Film')}</i></span></div>`;
         }).join('') +
         (items.length > 4 ? `<div class="muted">and ${items.length - 4} more</div>` : '');
@@ -3421,7 +3443,7 @@ async function renderHealth(v) {
 
   const rowFor = (x, sub) => {
     const b = el('button', 'mini');
-    b.innerHTML = `<img src="${imgUrl(x.poster, 'w185')}" alt="">
+    b.innerHTML = `<img loading="lazy" decoding="async" src="${imgUrl(x.poster, 'w185')}" alt="">
       <span><b>${esc(x.name)}</b><i>${esc(sub)}</i></span><span class="ch">›</span>`;
     b.onclick = () => openShow(x.id, x.name);
     return b;
@@ -3537,7 +3559,7 @@ function renderDiary(v) {
         ${h.rating ? `<span class="chip plain">${'★'.repeat(h.rating)}</span>` : ''}
         ${h.platform ? `<span class="chip plain">${esc(h.platform)}</span>` : ''}
         ${parseMoods(h.feeling).map(m => `<span class="chip plain">${esc(m)}</span>`).join('')}
-        ${(() => { const f = favOf(h); return f ? `<span class="chip fav-chip">${f.p ? `<img src="${imgUrl(f.p, 'w92')}" alt="">` : ''}${esc(f.c)}</span>` : ''; })()}</span>`;
+        ${(() => { const f = favOf(h); return f ? `<span class="chip fav-chip">${f.p ? `<img loading="lazy" decoding="async" src="${imgUrl(f.p, 'w92')}" alt="">` : ''}${esc(f.c)}</span>` : ''; })()}</span>`;
     b.onclick = () => isTv
       ? (isFootballShow(obj) ? openFootball(h.item, obj?.name || '') : openEpisode(h.item, obj?.name || '', h.code))
       : openMovie(h.item, obj?.name || '');
@@ -3900,7 +3922,7 @@ function renderData(v) {
     over.sort((a, b) => (countedEps(b) - b.total_episodes) - (countedEps(a) - a.total_episodes))
       .slice(0, 12).forEach(x => {
         const b = el('button', 'mini');
-        b.innerHTML = `<img src="${imgUrl(x.poster_path, 'w185')}" alt="">
+        b.innerHTML = `<img loading="lazy" decoding="async" src="${imgUrl(x.poster_path, 'w185')}" alt="">
           <span><b>${esc(x.name)}</b><i>${countedEps(x)} watched · ${x.total_episodes} exist
           (+${countedEps(x) - x.total_episodes})</i></span><span class="ch">›</span>`;
         b.onclick = () => openShow(x.id, x.name);
@@ -4170,10 +4192,10 @@ window.addEventListener('popstate', (e) => {
 
 function sheetHeader(title, backdrop, poster, chips) {
   const bg = backdrop ? imgUrl(backdrop, 'w780') : (isAbs(poster) ? '' : imgUrl(poster, 'w780'));
-  return `${bg ? `<div class="sheet-hero"><img src="${bg}" alt=""></div>`
+  return `${bg ? `<div class="sheet-hero"><img loading="lazy" decoding="async" src="${bg}" alt=""></div>`
                : '<div class="sheet-hero plain"></div>'}
     <div class="sheet-head">
-      <div class="sheet-poster"><img src="${imgUrl(poster)}"
+      <div class="sheet-poster"><img loading="lazy" decoding="async" src="${imgUrl(poster)}"
         style="object-fit:${isAbs(poster) ? 'contain' : 'cover'}" alt=""></div>
       <div><div class="sheet-title">${esc(title)}</div>
         <div>${chips.filter(Boolean).map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div></div>
@@ -4271,7 +4293,7 @@ function reactionEditor(container, entry, ctx = {}) {
       cast.forEach(person => {
         const f = el('button', 'rx-face');
         f.dataset.a = String(person.a);
-        f.innerHTML = `<span class="rx-ph">${person.p ? `<img src="${imgUrl(person.p, 'w185')}" alt="">`
+        f.innerHTML = `<span class="rx-ph">${person.p ? `<img loading="lazy" decoding="async" src="${imgUrl(person.p, 'w185')}" alt="">`
                         : `<i>${esc(person.c.slice(0, 1))}</i>`}</span>
                        <b>${esc(person.c)}</b><small>${esc(person.n)}</small>`;
         f.onclick = async () => {
@@ -4428,7 +4450,7 @@ async function trailerBlock(kind, id, slot) {
             || vids.find(v => v.type === 'Teaser') || null;
   if (!pick) return;
   slot.innerHTML = `<button class="trailer" aria-label="Play trailer">
-      <img src="https://i.ytimg.com/vi/${encodeURIComponent(pick.key)}/hqdefault.jpg" alt="">
+      <img loading="lazy" decoding="async" src="https://i.ytimg.com/vi/${encodeURIComponent(pick.key)}/hqdefault.jpg" alt="">
       <span class="tr-shade"></span>
       <span class="tr-play">${ico('play')}</span>
       <span class="tr-lbl">${esc(pick.name || 'Trailer')}</span></button>
@@ -4535,7 +4557,7 @@ async function openActor(actorId, actorName) {
   body.innerHTML = sheetHeader(person.name || actorName, '', person.profile_path, chips) +
     `<div class="you-stat">
        <b>${seenList.length}</b><span>of their ${uniq.size} credits you've watched</span></div>` +
-    (fav ? `<div class="fav-card"><span class="fav-ph">${fav.p ? `<img src="${imgUrl(fav.p, 'w185')}" alt="">` : ''}</span>
+    (fav ? `<div class="fav-card"><span class="fav-ph">${fav.p ? `<img loading="lazy" decoding="async" src="${imgUrl(fav.p, 'w185')}" alt="">` : ''}</span>
         <span class="fav-tx"><i>Your favourite as</i><b>${esc(fav.c)}</b><small>picked ${fav.count}× across ${fav.shows.size} show${fav.shows.size > 1 ? 's' : ''}</small></span></div>` : '') +
     (bio ? sec('About', clampBlock(bio)) : '') +
     (seenList.length ? '<section class="pg-sec seen-slot"></section>' : '') +
@@ -4816,7 +4838,7 @@ async function openShow(showId, showName) {
   const mainAction = !inLib
     ? '<button class="btn gold act-lib pg-main">Add to library</button>'
     : up ? `<div class="nextup">
-        <div class="nu-still">${up.ep.still_path ? `<img src="${imgUrl(up.ep.still_path, 'w300')}" alt="">` : ''}</div>
+        <div class="nu-still">${up.ep.still_path ? `<img loading="lazy" decoding="async" src="${imgUrl(up.ep.still_path, 'w300')}" alt="">` : ''}</div>
         <div class="nu-body"><span class="nu-k">Up next · ${esc(up.code)}</span>
           <b>${esc(up.ep.name || 'Episode ' + up.ep.episode_number)}</b>
           <i>${esc(relDay(up.ep.air_date))}</i></div>
@@ -4834,7 +4856,7 @@ async function openShow(showId, showName) {
   const you = !inLib ? '' :
     (total ? `<div class="prog-line"><div class="progress"><span style="width:${Math.min(watched / total, 1) * 100}%"></span></div>
        <div class="prog-tx"><b>${watched} of ${total}</b><span>${left ? `${left} left · about ${fmtMins(mins)}` : 'finished'}</span></div></div>` : '') +
-    (fav ? `<div class="fav-card"><span class="fav-ph">${fav.p ? `<img src="${imgUrl(fav.p, 'w185')}" alt="">` : ''}</span>
+    (fav ? `<div class="fav-card"><span class="fav-ph">${fav.p ? `<img loading="lazy" decoding="async" src="${imgUrl(fav.p, 'w185')}" alt="">` : ''}</span>
         <span class="fav-tx"><i>Your favourite</i><b>${esc(fav.c)}</b><small>${esc(fav.n)} · picked ${fav.count}×</small></span></div>` : '') +
     (stats ? `<div class="facts">
        <div class="fact"><span>${ico("calendar")}</span><span>First watched</span><b>${stats.first}</b></div>
@@ -4942,7 +4964,7 @@ async function openShow(showId, showName) {
 
       const row = el('div', 'ep');
       row.innerHTML = `<div class="ep-thumb">
-          ${ep.still_path ? `<img src="${imgUrl(ep.still_path, 'w300')}" style="${future ? 'opacity:.45' : ''}" alt="">`
+          ${ep.still_path ? `<img loading="lazy" decoding="async" src="${imgUrl(ep.still_path, 'w300')}" style="${future ? 'opacity:.45' : ''}" alt="">`
                           : '<div class="ep-noimg">No still</div>'}
           ${on ? '<button class="ep-notes">Notes</button>' : ''}
           ${on ? '<button class="ep-again">↻ Again</button>' : ''}</div>
@@ -5135,16 +5157,16 @@ async function openMatch(showId, showName, code, game) {
                  : game.home_goals === game.away_goals ? '' : ' lose');
   // Each club's crest, huge and cropped at its own half of the hero.
   const halves = `<div class="mh-halves">
-      <span class="mh-half l">${game.home_crest ? `<img src="${game.home_crest}" alt="">` : ''}</span>
-      <span class="mh-half r">${game.away_crest ? `<img src="${game.away_crest}" alt="">` : ''}</span>
+      <span class="mh-half l">${game.home_crest ? `<img loading="lazy" decoding="async" src="${game.home_crest}" alt="">` : ''}</span>
+      <span class="mh-half r">${game.away_crest ? `<img loading="lazy" decoding="async" src="${game.away_crest}" alt="">` : ''}</span>
     </div>`;
   body.innerHTML = `<div class="sheet-hero plain match-hero" style="--cc:${compRgb(mcode)}">${halves}
       <div class="mh-md">Matchday ${esc(md)}</div>
       <div class="mh-teams">
-        <div class="mh-team${side(true)}">${game.home_crest ? `<img src="${game.home_crest}" alt="">` : ''}
+        <div class="mh-team${side(true)}">${game.home_crest ? `<img loading="lazy" decoding="async" src="${game.home_crest}" alt="">` : ''}
           <span>${esc(game.home)}</span></div>
         <div class="mh-score">${esc(score || 'v')}</div>
-        <div class="mh-team${side(false)}">${game.away_crest ? `<img src="${game.away_crest}" alt="">` : ''}
+        <div class="mh-team${side(false)}">${game.away_crest ? `<img loading="lazy" decoding="async" src="${game.away_crest}" alt="">` : ''}
           <span>${esc(game.away)}</span></div>
       </div>
       <div class="mh-when">${esc(game.date ? fbDayLabel(game.date) : '')} · ${esc((game.kickoff || '').slice(11, 16))} Dubai · ${finished ? 'Full time'
@@ -5220,9 +5242,9 @@ function fixtureCard(g, md, i, ctx) {
   const wrap = el('div', 'fx-wrap');
   wrap.innerHTML = `<div class="fx-under">${ico('check')}<b>Watched</b></div>
     <div class="fx-card${on ? ' seen' : ''}${mine ? ' mine' : ''}${g.started ? '' : ' later'}">
-      <div class="fx-team${res('h')}">${g.home_crest ? `<img src="${g.home_crest}" alt="">` : ''}<span>${esc(g.home)}</span></div>
+      <div class="fx-team${res('h')}">${g.home_crest ? `<img loading="lazy" decoding="async" src="${g.home_crest}" alt="">` : ''}<span>${esc(g.home)}</span></div>
       <div class="fx-mid">${centre}<i>${esc(status)}</i></div>
-      <div class="fx-team${res('a')}">${g.away_crest ? `<img src="${g.away_crest}" alt="">` : ''}<span>${esc(g.away)}</span></div>
+      <div class="fx-team${res('a')}">${g.away_crest ? `<img loading="lazy" decoding="async" src="${g.away_crest}" alt="">` : ''}<span>${esc(g.away)}</span></div>
       ${on ? `<span class="fx-tick">${ico('check')}</span>` : ''}
     </div>`;
   const card = wrap.querySelector('.fx-card');
@@ -5290,7 +5312,7 @@ async function openFootball(showId, showName) {
       <div class="prog-tx"><b>${watched.size} watched</b><span>${Math.max(0, played - caught)} to catch up · ${total - played} still to play</span></div></div>` : '';
 
   const heroHtml = `<div class="fb-hero" style="--cc:${compRgb(code)}">
-      <img class="fb-emblem" src="${emblem}" alt="">
+      <img loading="lazy" decoding="async" class="fb-emblem" src="${emblem}" alt="">
       <div class="fb-title">${esc(FOOTBALL_COMPETITIONS[code] || showName)}</div>
       <div class="fb-season">${season}/${String(season + 1).slice(2)} · ${chips.map(esc).join(' · ')}</div>
     </div><div class="sheet-body">`;
@@ -5325,7 +5347,7 @@ async function openFootball(showId, showName) {
     const card = el('button', 'team-card');
     const form = formGuide(all, team);
     card.style.setProperty('--cc', compRgb(code));
-    card.innerHTML = `<span class="tc-crest">${crest ? `<img src="${crest}" alt="">` : ''}</span>
+    card.innerHTML = `<span class="tc-crest">${crest ? `<img loading="lazy" decoding="async" src="${crest}" alt="">` : ''}</span>
       ${form.length ? `<span class="tc-form">${form.map(f => `<i class="f-${f.r.toLowerCase()}" title="${esc(f.vs)} ${esc(f.s)}">${f.r}</i>`).join('')}</span>` : ''}
       <span class="tc-tx"><i>${next ? 'Next match' : 'Last match'}</i>
         <b>${show ? esc(`${show.g.home} v ${show.g.away}`) : esc(team)}</b>
@@ -5450,15 +5472,20 @@ async function start() {
   await loadHistoryFirstPage();
   window.__mytvBooted = true;
   render();
+  if (safeMode) setTimeout(() => toast('Recovered from a crash — heavy extras are paused for this launch'), 1200);
   loadHistoryRest(() => { if (view === 'me' || meTab === 'journal') render(); });
   // Push an earned wrap-up once per app open, oldest first, like Streamlit does.
+  // The new recap is the heaviest screen in the app, and launch is already the
+  // busiest moment. So it's offered, not forced open — and never at all on a
+  // launch that follows a crash.
   const due = pendingRecaps();
-  if (due.length && !sessionStorage.getItem('recapShown')) {
+  if (due.length && !sessionStorage.getItem('recapShown') && !safeMode) {
     sessionStorage.setItem('recapShown', '1');
     setTimeout(() => {
       const r = due[0];
-      if (r.kind === 'month') openMonthRecap(r.key, r.id); else openYearRecap(r.key, r.id);
-    }, 700);
+      toastAction(`Your ${r.kind === 'month' ? prettyMonth(r.key) : r.key} recap is ready`, 'Open',
+        () => r.kind === 'month' ? openMonthRecap(r.key, r.id) : openYearRecap(r.key, r.id));
+    }, 2500);
   }
 }
 
