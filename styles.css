@@ -1968,3 +1968,12 @@ body { font-feature-settings: 'cv11', 'ss03'; letter-spacing: -0.006em; }
 @media (prefers-reduced-motion: reduce) {
   .sv-card.in .barcode, .sv-card.in .sv-mosaic { animation: none !important; }
 }
+
+/* No artwork yet: a deliberate tile with the title's initial, never an empty hole. */
+.no-art { display: grid; place-items: center; flex: none; width: 54px; aspect-ratio: 2/3; border-radius: 8px;
+  background: linear-gradient(160deg, rgba(var(--accent-rgb), .28), rgba(255,255,255,.04)); border: 1px solid var(--line);
+  font-family: var(--font-display); font-weight: 800; font-size: 1.2rem; color: var(--ink); }
+.no-art.big { width: 100%; height: 100%; border-radius: inherit; align-content: center; gap: 6px; padding: 10px; text-align: center; }
+.no-art.big b { font-size: 2rem; line-height: 1; }
+.no-art.big i { font-style: normal; font-family: var(--font-ui); font-weight: 600; font-size: .62rem; color: var(--ink-dim);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }

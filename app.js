@@ -13,7 +13,7 @@
 
 'use strict';
 
-const BUILD = '2026-10-19-a';      // shown in Me -> Data; bump on every upload
+const BUILD = '2026-10-19-b';      // shown in Me -> Data; bump on every upload
 const CFG_KEY = 'mytv.cfg';
 const TMDB_TTL = 12 * 3600 * 1000;
 const FOOTBALL_TTL = 3600 * 1000;
@@ -492,10 +492,12 @@ function tmdbLife(path, data) {
   return 12 * 3600 * 1000;
 }
 
-async function tmdb(path, params = {}) {
+async function tmdb(path, params = {}, opts = {}) {
   const qs = new URLSearchParams({ api_key: cfg.tmdb, ...params }).toString();
   const key = 'tmdb:' + path + '?' + qs.replace(/api_key=[^&]*&?/, '');
-  const hit = cacheGet(key, TMDB_TTL);   // TMDB_TTL is only a floor for old entries
+  // opts.fresh skips the cached copy (but still refreshes it): used when an
+  // old cached answer is exactly what we're trying to get past.
+  const hit = opts.fresh ? null : cacheGet(key, TMDB_TTL);   // TMDB_TTL is only a floor for old entries
   if (hit) return hit;
   const data = await fetchJson(`https://api.themoviedb.org/3/${path}?${qs}`);
   if (!data) return {};
@@ -1404,8 +1406,9 @@ function sortFeed(rows, mode, desc) {
 function posterEl({ title, poster, badge, progress, mediaHtml, onOpen, quick }) {
   const b = el('button', 'poster');
   const media = mediaHtml ||
-    `<img loading="lazy" src="${imgUrl(poster)}" alt=""
-      style="width:100%;height:100%;object-fit:${isAbs(poster) ? 'contain' : 'cover'};display:block">`;
+    (imgUrl(poster) ? `<img loading="lazy" src="${imgUrl(poster)}" alt=""
+      style="width:100%;height:100%;object-fit:${isAbs(poster) ? 'contain' : 'cover'};display:block">`
+      : `<span class="no-art big"><b>${esc(String(title || '?').trim().slice(0, 1).toUpperCase())}</b><i>${esc(title || '')}</i></span>`);
   b.innerHTML = media +
     (badge ? `<span class="p-badge">${esc(badge)}</span>` : '') +
     `<span class="p-title">${esc(title)}</span>` +
@@ -3549,8 +3552,9 @@ function renderDiary(v) {
     // A w500 source for the wash: at only 4px blur a w185 image looks mushy.
     const wash = imgUrl(obj?.poster_path, 'w500');
     b.innerHTML = `${wash ? `<span class="log-wash" style="background-image:url('${wash}')"></span>` : ''}
-      <img loading="lazy" src="${art}" alt=""
-        style="object-fit:${isAbs(obj?.poster_path) ? 'contain' : 'cover'}">
+      ${art ? `<img loading="lazy" src="${art}" alt=""
+        style="object-fit:${isAbs(obj?.poster_path) ? 'contain' : 'cover'}">`
+            : `<span class="no-art">${esc((obj?.name || '?').trim().slice(0, 1).toUpperCase())}</span>`}
       <span class="log-main"><span class="log-name">${esc(obj?.name || 'Unknown')}</span>
         <span class="log-meta">${esc(h.at.slice(0, 16))}</span><br>
         ${h.code ? `<span class="chip">${esc(fixtureIndex[`${h.item}|${h.code}`] || h.code)}</span>`
@@ -4209,8 +4213,9 @@ function sheetHeader(title, backdrop, poster, chips) {
   return `${bg ? `<div class="sheet-hero"><img loading="lazy" decoding="async" src="${bg}" alt=""></div>`
                : '<div class="sheet-hero plain"></div>'}
     <div class="sheet-head">
-      <div class="sheet-poster"><img loading="lazy" decoding="async" src="${imgUrl(poster)}"
-        style="object-fit:${isAbs(poster) ? 'contain' : 'cover'}" alt=""></div>
+      <div class="sheet-poster">${imgUrl(poster) ? `<img loading="lazy" decoding="async" src="${imgUrl(poster)}"
+        style="object-fit:${isAbs(poster) ? 'contain' : 'cover'}" alt="">`
+        : `<span class="no-art big"><b>${esc(String(title || '?').trim().slice(0, 1).toUpperCase())}</b></span>`}</div>
       <div><div class="sheet-title">${esc(title)}</div>
         <div>${chips.filter(Boolean).map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div></div>
     </div><div class="sheet-body">`;
@@ -4914,6 +4919,11 @@ async function openShow(showId, showName) {
   ]);
 
   tintSheet(b.poster_path);
+  // Added before TMDB had artwork? Take it now that it does.
+  if (inLib && !s.poster_path && b.poster_path) {
+    s.poster_path = b.poster_path;
+    guardedWrite('artwork', () => savePayload()).then(() => invalidateFeeds()).catch(() => {});
+  }
   if (inLib) {
     const head = body.querySelector('.sheet-head');
     if (head) head.after(statusBar(s, 'tv', () => openShow(showId, showName)));
@@ -5110,6 +5120,10 @@ async function openMovie(id, name) {
 
   wireClamp(body);
   tintSheet(d.poster_path);
+  if (inLib && !m.poster_path && d.poster_path) {
+    m.poster_path = d.poster_path;
+    guardedWrite('artwork', () => savePayload()).then(() => invalidateFeeds()).catch(() => {});
+  }
   if (inLib) {
     const head = body.querySelector('.sheet-head');
     if (head) head.after(statusBar(m, 'movie', () => openMovie(id, name)));
@@ -5529,6 +5543,35 @@ async function syncFromServer() {
   } catch { /* history can wait for the next launch */ }
 }
 
+/** Artwork that was missing when a title was added. A brand-new show often
+    has no poster on TMDB yet; the app stored the gap and never looked again.
+    Now: a few titles per launch, in the background, asking TMDB afresh. A
+    title that still has nothing is left alone for three days before the next try. */
+async function healMissingArt() {
+  const due = (k) => { try { return Date.now() - (+localStorage.getItem('heal:' + k) || 0) > 3 * DAY; } catch { return false; } };
+  const items = [
+    ...db.shows.filter(x => !isFootballShow(x) && !x.poster_path).map(x => ['tv', x]),
+    ...db.movies.filter(x => !x.poster_path).map(x => ['movie', x]),
+  ].filter(([k, it]) => due(`${k}:${it.id}`)).slice(0, 12);
+  if (!items.length) return 0;
+  let fixed = 0;
+  await mapLimit(items, 3, async ([kind, it]) => {
+    try { localStorage.setItem(`heal:${kind}:${it.id}`, String(Date.now())); } catch { /* ignore */ }
+    const d = await tmdb(`${kind}/${it.id}`, {}, { fresh: true }).catch(() => null);
+    if (!d) return;
+    if (d.poster_path && !it.poster_path) { it.poster_path = d.poster_path; fixed++; }
+    if (kind === 'tv' && d.first_air_date && !it.first_air_date) it.first_air_date = d.first_air_date;
+    if (kind === 'movie' && d.release_date && !it.release_date) it.release_date = d.release_date;
+  });
+  if (fixed) {
+    invalidateFeeds();
+    if (await guardedWrite('artwork', () => savePayload())) {
+      if (['me', 'library'].includes(view)) render();
+    }
+  }
+  return fixed;
+}
+
 /** Things that only make sense once the app is on screen. */
 function afterBoot() {
   // Remember that you've started using the app, so the loader won't reload under you.
@@ -5549,6 +5592,7 @@ function afterBoot() {
   window.addEventListener('mytv-update', offer, { once: true });
 
   setTimeout(purgeExpiredCache, 20000);
+  if (!safeMode) setTimeout(() => healMissingArt().catch(() => {}), 30000);
 }
 
 /** The app has painted its first real screen: log it and drop the loading screen. */
