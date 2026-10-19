@@ -8,8 +8,23 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Inter:wght@400..800&family=Instrument+Serif:ital@0;1&display=swap">
-  <style>html,body{background:#07080A;color:#F3F4F6;margin:0}</style>
+  <!-- Fonts load without blocking: until they arrive, system fonts stand in. -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Inter:wght@400..800&family=Instrument+Serif:ital@0;1&display=swap" media="print" onload="this.media='all'">
+  <style>
+    html,body{background:#07080A;color:#F3F4F6;margin:0}
+    /* The loading screen is plain HTML and CSS, so it shows on the very first
+       frame — even if every script after it is slow or stuck. */
+    #boot{position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center;
+      gap:14px;background:radial-gradient(circle at 50% 0%,#1A1D24 0%,#050505 70%);font:500 14px/1.4 system-ui,sans-serif;color:#9AA0AA}
+    #boot b{font:800 26px/1 system-ui,sans-serif;color:#F3F4F6;letter-spacing:-.02em}
+    #boot .bar{width:120px;height:3px;border-radius:9px;background:rgba(255,255,255,.1);overflow:hidden}
+    #boot .bar i{display:block;width:40%;height:100%;border-radius:9px;background:#8FA8FF;animation:bootbar 1.1s ease-in-out infinite}
+    @keyframes bootbar{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}
+    #boot .more{display:none;max-width:300px;text-align:center;font-size:12px;color:#7A808A}
+    #boot.slow .more{display:block}
+    #boot button{margin-top:6px;padding:10px 22px;border-radius:999px;border:0;background:#F3F4F6;color:#08090B;font:700 14px system-ui,sans-serif}
+    @media (prefers-reduced-motion:reduce){#boot .bar i{animation:none;width:100%}}
+  </style>
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -61,6 +76,13 @@
 
 <div id="toast" hidden></div>
 <pre id="fatal" hidden></pre>
+<div id="boot" role="status" aria-live="polite">
+  <b>My TV Time</b>
+  <div class="bar"><i></i></div>
+  <div id="boot-step">Starting…</div>
+  <div class="more"><div id="boot-why">This is taking longer than usual — probably a slow connection.</div>
+    <button onclick="location.reload()">Reload</button></div>
+</div>
 
 <script>
 // Belt and braces: remove any service worker still registered, even if the
@@ -108,74 +130,123 @@ window.addEventListener('unhandledrejection', function (e) {
 </script>
 <script>
 /* ===================================================================
-   VERSION LOADER
+   LOADER (v2)
 
-   This page used to name its files directly — styles.css?v=31, app.js?v=31.
-   That made index.html the thing deciding which build you saw, so any stale
-   copy of it (GitHub's CDN, Chrome's cache, the old service worker) quietly
-   brought the old design back on the next launch.
+   Startup used to be four network trips in single file — Google Fonts
+   (which blocked every script below it), then the version check (up to
+   4s), then styles, and only then app.js — with a blank screen
+   throughout. On a phone whose connection is just waking up, that could
+   sit blank for a long time, and the watchdog couldn't even start.
 
-   Now the page asks the server which version is current, every launch, with
-   caching disabled, then loads that version's files. A stale index.html can
-   no longer pin you to an old build. Offline, it uses the last version it saw.
+   Now: fonts never block; the app starts at once with the version this
+   phone already knows; app.js downloads in parallel with the styles; and
+   the update check runs alongside. If it finds a newer build in the first
+   few seconds, the page reloads into it — otherwise the app offers it.
+   Every step is timestamped on the phone, so a stall leaves evidence.
    =================================================================== */
 (function () {
-  var KEY = 'mytv.ver';
+  var KEY = 'mytv.ver', LOG = 'mytv.bootlog', t0 = Date.now(), steps = [];
+  var TEXT = { html: 'Starting…', styles: 'Loading the app…', script: 'Opening your library…', version: 'Checking for updates…' };
+
+  // Did the previous launch stall before painting? Keep its log for the app to report.
+  try {
+    var prev = JSON.parse(localStorage.getItem(LOG) || 'null');
+    if (prev && prev.steps && !prev.steps.some(function (x) { return x[0] === 'painted'; })) window.__prevBootStall = prev;
+  } catch (e) {}
+
+  function mark(step) {
+    steps.push([step, Date.now() - t0]);
+    try { localStorage.setItem(LOG, JSON.stringify({ at: t0, steps: steps })); } catch (e) {}
+    var el = document.getElementById('boot-step');
+    if (el && TEXT[step]) el.textContent = TEXT[step];
+  }
+  window.__bootMark = mark;
+  mark('html');
+
   var known = '';
   try { known = localStorage.getItem(KEY) || ''; } catch (e) {}
+  var started = false;
 
   function load(v) {
+    if (started) return;
+    started = true;
     window.__mytvVersion = v;
-    var css = document.createElement('link');
-    css.rel = 'stylesheet';
-    css.href = 'styles.css?v=' + encodeURIComponent(v);
-    // Start the script only once the styles are in, so nothing paints unstyled.
-    var started = false;
+    var q = '?v=' + encodeURIComponent(v);
+    // Start downloading the app now, in parallel with the styles.
+    var pre = document.createElement('link');
+    pre.rel = 'preload'; pre.as = 'script'; pre.href = 'app.js' + q;
+    document.head.appendChild(pre);
+    var go = false;
     function startApp() {
-      if (started) return; started = true;
+      if (go) return; go = true;
+      mark('styles');
       var js = document.createElement('script');
-      js.src = 'app.js?v=' + encodeURIComponent(v);
+      js.src = 'app.js' + q;
+      js.onload = function () { mark('script'); };
       js.onerror = function () {
-        var box = document.getElementById('fatal');
-        if (box) { box.hidden = false; box.textContent = 'Could not load app.js (version ' + v + ').'; }
+        var w = document.getElementById('boot-why'), b = document.getElementById('boot');
+        if (w) w.textContent = 'Could not download the app (version ' + v + '). Check your connection.';
+        if (b) b.className = 'slow';
       };
       document.body.appendChild(js);
     }
-    css.onload = startApp;
-    css.onerror = startApp;           // a styling failure must never stop the app
-    setTimeout(startApp, 2500);       // and nor may a stylesheet that never answers
+    var css = document.createElement('link');
+    css.rel = 'stylesheet'; css.href = 'styles.css' + q;
+    css.onload = startApp; css.onerror = startApp;   // a styling failure must never stop the app
+    setTimeout(startApp, 2500);                         // nor a stylesheet that never answers
     document.head.appendChild(css);
   }
 
-  // The timestamp makes this a URL no cache has ever seen; no-store stops the
-  // browser keeping it. Between them the answer is always the live one.
+  // Start immediately with the version this phone knows.
+  if (known) load(known);
+
   var ctrl = ('AbortController' in window) ? new AbortController() : null;
   var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 4000);
   fetch('version.json?t=' + Date.now(), { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (j) {
       clearTimeout(timer);
-      var v = (j && j.v) ? String(j.v) : (known || 'fallback');
+      mark('version');
+      var v = (j && j.v) ? String(j.v) : '';
+      if (!v) { if (!known) load('fallback'); return; }
       try { localStorage.setItem(KEY, v); } catch (e) {}
-      load(v);
+      if (!known) { load(v); return; }
+      if (v !== known) {
+        // A newer build exists. Early on, just switch to it; once you're
+        // using the app, offer it rather than yank the screen away.
+        if (Date.now() - t0 < 6000 && !window.__mytvInteracted) location.reload();
+        else { window.__mytvUpdate = v; try { window.dispatchEvent(new Event('mytv-update')); } catch (e) {} }
+      }
     })
-    .catch(function () { clearTimeout(timer); load(known || 'fallback'); });
+    .catch(function () { clearTimeout(timer); if (!known) load('fallback'); });
 })();
 </script>
 <script>
-// If app.js failed to load or parse, boot() never ran and both panels stay
-// hidden — a white page. Detect that and say so.
+// The loading screen removes ITSELF as soon as the app or setup screen is
+// visible. It must not depend on app.js doing it: on the launch after an
+// update, the phone first runs its cached older app.js, which has never heard
+// of this screen and would leave it covering everything.
+var __bootWatch = setInterval(function () {
+  var b = document.getElementById('boot');
+  if (!b || !b.parentNode) { clearInterval(__bootWatch); return; }
+  var app = document.getElementById('app'), setup = document.getElementById('setup');
+  if ((app && !app.hidden) || (setup && !setup.hidden)) { b.parentNode.removeChild(b); clearInterval(__bootWatch); }
+}, 250);
+
+// Escalating watchdog: after 6 seconds the loading screen explains itself and
+// offers Reload; after 20 it names the step it is stuck on.
 setTimeout(function () {
-  var setup = document.getElementById('setup'), app = document.getElementById('app');
-  if (setup && app && setup.hidden && app.hidden) {
-    var box = document.getElementById('fatal');
-    if (box) {
-      box.hidden = false;
-      box.textContent = 'The app did not start. Check your connection and reopen — ' +
-        'if it persists, clear this site\'s data.';
-    }
-  }
-}, 7000);   // allow for the version lookup on a slow connection
+  var b = document.getElementById('boot'); if (b && b.parentNode) b.className = 'slow';
+}, 6000);
+setTimeout(function () {
+  var b = document.getElementById('boot'), w = document.getElementById('boot-why');
+  if (!b || !b.parentNode || !w) return;
+  try {
+    var log = JSON.parse(localStorage.getItem('mytv.bootlog') || '{}');
+    var last = (log.steps || []).slice(-1)[0];
+    if (last) w.textContent = 'Still waiting after "' + last[0] + '" (' + Math.round(last[1] / 1000) + 's in). Reload usually fixes a slow connection.';
+  } catch (e) {}
+}, 20000);
 </script>
 </body>
 </html>

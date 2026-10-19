@@ -13,7 +13,7 @@
 
 'use strict';
 
-const BUILD = '2026-10-18-g';      // shown in Me -> Data; bump on every upload
+const BUILD = '2026-10-19-a';      // shown in Me -> Data; bump on every upload
 const CFG_KEY = 'mytv.cfg';
 const TMDB_TTL = 12 * 3600 * 1000;
 const FOOTBALL_TTL = 3600 * 1000;
@@ -3720,6 +3720,20 @@ async function runHealthCheck(out) {
     add(false, 'Rewatch migration missing', 'run rewatch_migration.sql — episode rewatches will not save');
   }
 
+  // 1b. how long did start-up take, and did any launch stall?
+  try {
+    const log = JSON.parse(localStorage.getItem('mytv.bootlog') || 'null');
+    if (log && log.steps) {
+      const painted = log.steps.find(x => x[0] === 'painted');
+      add(painted ? painted[1] < 4000 : null, 'Start-up', log.steps.map(([k, ms]) => `${k} ${(ms / 1000).toFixed(1)}s`).join(' → '));
+    }
+    const stall = JSON.parse(localStorage.getItem('mytv.laststall') || 'null');
+    if (stall && stall.steps) {
+      const last = stall.steps[stall.steps.length - 1];
+      add(false, 'A launch stalled', `${new Date(stall.at).toLocaleString('en-GB')} — stuck after "${last[0]}" (${(last[1] / 1000).toFixed(1)}s): ${stall.steps.map(x => x[0]).join(' → ')}`);
+    }
+  } catch { /* ignore */ }
+
   // 2a. is all of your history actually loaded?
   const onServer = await serverHistoryCount();
   if (onServer != null) {
@@ -5462,6 +5476,8 @@ async function start() {
     // Everything needed for the first screen is already on the device.
     window.__mytvBooted = true;
     render();
+    bootPainted();
+    afterBoot();
     syncFromServer();
     return;
   }
@@ -5472,6 +5488,8 @@ async function start() {
   await loadHistoryFirstPage();
   window.__mytvBooted = true;
   render();
+  bootPainted();
+  afterBoot();
   if (safeMode) setTimeout(() => toast('Recovered from a crash — heavy extras are paused for this launch'), 1200);
   loadHistoryRest(() => { if (view === 'me' || meTab === 'journal') render(); });
   // Push an earned wrap-up once per app open, oldest first, like Streamlit does.
@@ -5511,11 +5529,64 @@ async function syncFromServer() {
   } catch { /* history can wait for the next launch */ }
 }
 
+/** Things that only make sense once the app is on screen. */
+function afterBoot() {
+  // Remember that you've started using the app, so the loader won't reload under you.
+  const touched = () => { window.__mytvInteracted = true; };
+  window.addEventListener('pointerdown', touched, { once: true, passive: true });
+
+  // A previous launch that stalled before painting leaves its log behind.
+  const stall = window.__prevBootStall;
+  if (stall && stall.steps && stall.steps.length) {
+    const last = stall.steps[stall.steps.length - 1];
+    setTimeout(() => toast(`Last launch stalled at "${last[0]}" — details in Settings → Health check`), 1800);
+    try { localStorage.setItem('mytv.laststall', JSON.stringify(stall)); } catch { /* ignore */ }
+  }
+
+  // A newer build, found after you'd started using the app: offer it.
+  const offer = () => toastAction('A new version is ready', 'Reload', () => location.reload(), 9000);
+  if (window.__mytvUpdate) offer();
+  window.addEventListener('mytv-update', offer, { once: true });
+
+  setTimeout(purgeExpiredCache, 20000);
+}
+
+/** The app has painted its first real screen: log it and drop the loading screen. */
+function bootPainted() {
+  try { if (window.__bootMark) window.__bootMark('painted'); } catch { /* ignore */ }
+  const b = $('#boot');                // same lookup helper as the rest of the app
+  if (b && b.parentNode) {
+    b.style.transition = 'opacity .25s ease'; b.style.opacity = '0';
+    setTimeout(() => b.remove(), 260);
+  }
+}
+
+/** Housekeeping, in idle time: delete cache entries that have expired.
+    They used to sit in storage until it filled — making every launch read
+    and hold more than it needed. A few at a time, never during start-up. */
+function purgeExpiredCache() {
+  let keys;
+  try { keys = Object.keys(localStorage).filter(k => /^(tmdb|tvm|col):/.test(k)); } catch { return; }
+  let i = 0, removed = 0;
+  const slice = () => {
+    const end = Math.min(keys.length, i + 40);
+    for (; i < end; i++) {
+      try {
+        const hit = JSON.parse(localStorage.getItem(keys[i]) || 'null');
+        if (hit && hit.t && hit.l && Date.now() - hit.t > hit.l) { localStorage.removeItem(keys[i]); removed++; }
+      } catch { /* leave anything unreadable alone */ }
+    }
+    if (i < keys.length) (window.requestIdleCallback || setTimeout)(slice);
+  };
+  slice();
+}
+
 function boot() {
   try { window.history.replaceState({ mytv: true, kind: 'root', view: 'next' }, ''); } catch { /* ignore */ }
   cfg = JSON.parse(localStorage.getItem(CFG_KEY) || 'null');
-  if (!cfg) { $('#setup').hidden = false; return; }
+  if (!cfg) { $('#setup').hidden = false; bootPainted(); return; }
   start().catch(err => {
+    bootPainted();
     $('#view').innerHTML = '';
     $('#view').appendChild(emptyState("Couldn't finish loading", String(err.message || err),
       { label: 'Retry', onClick: () => { invalidateFeeds(); location.reload(); } }));
