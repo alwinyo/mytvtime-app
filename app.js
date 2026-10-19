@@ -13,7 +13,7 @@
 
 'use strict';
 
-const BUILD = '2026-10-19-b';      // shown in Me -> Data; bump on every upload
+const BUILD = '2026-10-19-c';      // shown in Me -> Data; bump on every upload
 const CFG_KEY = 'mytv.cfg';
 const TMDB_TTL = 12 * 3600 * 1000;
 const FOOTBALL_TTL = 3600 * 1000;
@@ -83,7 +83,7 @@ let safeMode = false;
 try {
   safeMode = !!localStorage.getItem('mytv.booting');
   localStorage.setItem('mytv.booting', String(Date.now()));
-  setTimeout(() => { try { localStorage.removeItem('mytv.booting'); } catch { /* ignore */ } }, 15000);
+  setTimeout(() => { try { localStorage.removeItem('mytv.booting'); } catch { /* ignore */ } }, 45000);
 } catch { /* storage unavailable: carry on normally */ }         // set when later pages could not be fetched
 
 /** Try a few times before giving up. A single slow page used to stop the
@@ -339,18 +339,46 @@ function cacheSet(key, value, life) {
     // One oversized show used to overflow the quota, and the old fallback then
     // wiped every cached entry — so a single big series slowed down everything.
     if (blob.length > CACHE_MAX) return;
+    flight.wroteKB += blob.length / 512;          // UTF-16: 2 bytes a character
     localStorage.setItem(key, blob);
   } catch {
-    Object.keys(localStorage).filter(k => k.startsWith('tmdb:'))
-      .forEach(k => localStorage.removeItem(k));
+    // Storage full. This used to delete the ENTIRE cache — so the next
+    // launch re-downloaded everything, filled up, and wiped again. Now it
+    // drops expired entries and the oldest third, then tries once more.
+    if (makeRoom()) { try { localStorage.setItem(key, blob); } catch { /* skip this one */ } }
   }
+}
+
+function makeRoom() {
+  const now = Date.now(), entries = [];
+  let keys;
+  try { keys = Object.keys(localStorage); } catch { return false; }
+  for (const k of keys) {
+    if (!/^(tmdb|tvs|tvm|col):/.test(k)) continue;
+    const v = localStorage.getItem(k) || '';
+    // Read the timestamps without parsing the whole entry: {"t":…,"v":…,"l":…}
+    const t = +((/^\{"t":(\d+)/.exec(v) || [])[1] || 0), l = +((/"l":(\d+)\}$/.exec(v) || [])[1] || 0);
+    entries.push([k, t, l]);
+  }
+  let removed = 0;
+  for (const [k, t, l] of entries) if (l && now - t > l) { localStorage.removeItem(k); removed++; }
+  if (removed < entries.length / 3) {
+    entries.filter(([, t, l]) => !(l && now - t > l)).sort((a, b) => a[1] - b[1])
+      .slice(0, Math.ceil(entries.length / 3) - removed).forEach(([k]) => { localStorage.removeItem(k); removed++; });
+  }
+  return removed > 0;
 }
 
 /** Fetch that cannot hang forever. A stalled mobile request used to wedge the
     whole Up Next chain, because every show awaited the one before it. */
+/* FLIGHT RECORDER — what the app was doing, every 2 seconds for the first
+   minute: memory in use, requests made and still open, storage written.
+   If Chrome kills the page, the next launch reports the last readings. */
+const flight = { req: 0, open: 0, wroteKB: 0, task: 'start' };
 async function fetchJson(url, opts = {}, ms = 9000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
+  flight.req++; flight.open++;
   try {
     const res = await fetch(url, { ...opts, signal: ctrl.signal });
     if (!res.ok) return null;
@@ -359,6 +387,7 @@ async function fetchJson(url, opts = {}, ms = 9000) {
     return null;                       // timeout or network error -> skip, never hang
   } finally {
     clearTimeout(timer);
+    flight.open--;
   }
 }
 
@@ -656,6 +685,7 @@ async function loadHistoryFirstPage() {
 
 async function loadHistoryRest(onDone) {
   if (historyComplete || historyTableMissing) return;
+  flight.task = 'history';
   historyLoadError = '';
   try {
     for (let offset = history.length; ; offset += HISTORY_PAGE) {
@@ -929,19 +959,75 @@ function trimSeason(season) {
   }) };
 }
 
+/** How long a stored season stays fresh: a season still airing can change
+    within hours; a finished one essentially never does. */
+function seasonLife(season) {
+  const eps = (season && season.episodes) || [];
+  const recent = new Date(Date.now() - 21 * DAY).toISOString().slice(0, 10);
+  const live = !eps.length || eps.some(e => !e.air_date || e.air_date >= recent);
+  return live ? 6 * 3600 * 1000 : 30 * DAY;
+}
+
+/* Seasons are stored ONE AT A TIME, already trimmed, under keys every screen
+   shares. They used to be cached as TMDB's raw combined reply — every
+   episode's full crew and guest list — under a key made from exactly which
+   seasons were asked for, so Watching, Upcoming and the show page each kept
+   their own bloated copy of the same seasons. One stale-feed launch tried to
+   write 8 MB into a 5 MB store. */
+/* REMEMBERED ANSWERS for the Watching feed.
+   Each show's answer — "next is S2E5", or "nothing next" — is kept with how
+   long it stays true. An ended show you haven't touched can't grow a new
+   next episode, so its answer lasts 30 days; an airing one, 6 hours. A
+   stale feed then only re-asks TMDB about shows that could have changed,
+   instead of the whole library (≈1,800 requests every few hours before). */
+const NEXT_MEMO = 'mytv.nextmemo';
+let nextMemo = null;
+function loadNextMemo() {
+  if (nextMemo) return nextMemo;
+  try { nextMemo = JSON.parse(localStorage.getItem(NEXT_MEMO) || '{}'); } catch { nextMemo = {}; }
+  return nextMemo;
+}
+function saveNextMemo() {
+  try { localStorage.setItem(NEXT_MEMO, JSON.stringify(nextMemo || {})); } catch { /* not critical */ }
+}
+/** Anything about you or the show that would change the answer. */
+const nextSig = (s) => `${s.watched_episodes.length}:${s.cycles || 1}:${s.status || ''}:${s.total_episodes || 0}`;
+const answerLife = (head) => {
+  // Ended and nothing scheduled: it can't grow a new next episode.
+  if (/^(Ended|Canceled)$/.test(head.status || '') && !head.next_episode_to_air) return 30 * DAY;
+  // Airing: nothing changes until the next episode airs (unless you watch,
+  // which changes the signature anyway). Re-check a few hours after it lands.
+  const nx = head.next_episode_to_air && head.next_episode_to_air.air_date;
+  if (nx) return Math.max(6 * 3600 * 1000, Math.min(new Date(nx + 'T00:00:00Z') - Date.now() + 6 * 3600 * 1000, 14 * DAY));
+  return 3 * DAY;   // returning, but between seasons with nothing scheduled
+};
+
 async function showBundle(id, wantSeasons) {
   const base = await tmdb(`tv/${id}`);
   if (!base.seasons) return base;
-  let nums = base.seasons.filter(s => s.season_number > 0).map(s => s.season_number);
+  let nums = base.seasons.filter(x => x.season_number > 0).map(x => x.season_number);
   if (wantSeasons && wantSeasons.length) {
     const want = new Set(wantSeasons);
     nums = nums.filter(n => want.has(n));
   }
   const bundle = { ...base };
-  for (let i = 0; i < nums.length; i += 20) {
-    const chunk = nums.slice(i, i + 20);
-    const data = await tmdb(`tv/${id}`, { append_to_response: chunk.map(n => `season/${n}`).join(',') });
-    for (const n of chunk) if (data[`season/${n}`]) bundle[`season/${n}`] = trimSeason(data[`season/${n}`]);
+  const missing = [];
+  for (const n of nums) {
+    const hit = cacheGet(`tvs:${id}:${n}`, 30 * DAY);
+    if (hit) bundle[`season/${n}`] = hit; else missing.push(n);
+  }
+  for (let i = 0; i < missing.length; i += 20) {
+    const chunk = missing.slice(i, i + 20);
+    // Fetched directly: the raw reply is never cached, only the trimmed seasons.
+    const qs = new URLSearchParams({ api_key: cfg.tmdb, append_to_response: chunk.map(n => `season/${n}`).join(',') });
+    const data = (await fetchJson(`https://api.themoviedb.org/3/tv/${id}?${qs}`)) || {};
+    for (const n of chunk) {
+      const raw = data[`season/${n}`];
+      if (!raw) continue;
+      const t = trimSeason(raw);
+      bundle[`season/${n}`] = t;
+      cacheSet(`tvs:${id}:${n}`, t, seasonLife(t));
+    }
   }
   return bundle;
 }
@@ -1261,17 +1347,29 @@ async function computeNext(onProgress, onBatch) {
 
   const streamed = [];
 
-  const found = await mapLimit(candidates, 6, async (s) => {
+  flight.task = 'watching-feed';
+  const memo = loadNextMemo();
+  const found = await mapLimit(candidates, 4, async (s) => {
+    // Still-true answer from last time? Then no TMDB request at all.
+    const known = memo[s.id];
+    if (known && known.sig === nextSig(s) && known.until > Date.now()) {
+      if (known.row) { streamed.push(known.row); if (onBatch) onBatch(streamed.slice()); }
+      return known.row || null;
+    }
     const mark = furthestWatched(s);
     const head = await tmdb(`tv/${s.id}`);
+    const remember = (row) => { memo[s.id] = { sig: nextSig(s), row: row || null, until: Date.now() + answerLife(head) }; return row || null; };
+    // Finished? The show's own episode count says so — no seasons needed.
+    // This check used to come AFTER downloading up to six seasons.
+    const total = head.number_of_episodes || s.total_episodes || 0;
+    if (total && countedEps(s) >= total) return remember(null);
     const allSeasons = (head.seasons || []).filter(x => x.season_number > 0)
       .map(x => x.season_number).sort((a, b) => a - b);
-    // Only pull the seasons from where you are onward; a 34-season show does
-    // not need its whole history fetched to find the next episode.
     const from = allSeasons.filter(n => n >= mark.season);
-    const b = await showBundle(s.id, from.length ? from.slice(0, 6) : allSeasons.slice(0, 6));
-    const total = b.number_of_episodes || s.total_episodes || 0;
-    if (total && countedEps(s) >= total) return null;
+    // Not started: the next episode is S1E1, so season 1 is all we need.
+    // Otherwise it's in the current season or the next one or two.
+    const want = countedEps(s) === 0 ? allSeasons.slice(0, 1) : (from.length ? from.slice(0, 3) : allSeasons.slice(0, 1));
+    const b = await showBundle(s.id, want);
     const seen = new Set(s.watched_episodes);
 
     for (const n of (from.length ? from : allSeasons)) {
@@ -1286,11 +1384,12 @@ async function computeNext(onProgress, onBatch) {
                       date: air, kind: 'tv' };
         streamed.push(row);
         if (onBatch) onBatch(streamed.slice());   // paint what we have so far
-        return row;
+        return remember(row);
       }
     }
-    return null;
+    return remember(null);
   }, onProgress, 30000);                 // 30s ceiling — partial beats spinning
+  saveNextMemo();
 
   const rows = found.filter(Boolean);
   rows.push(...(await computeFootballRows('next')).map(r => ({ ...r, kind: 'tv' })));
@@ -1309,9 +1408,12 @@ async function computeSoon(onProgress) {
   const today = TODAY();
   const candidates = db.shows.filter(x => !x.dropped && !isFootballShow(x));
 
-  const found = await mapLimit(candidates, 6, async (s) => {
+  flight.task = 'upcoming-feed';
+  const found = await mapLimit(candidates, 4, async (s) => {
     const mark = furthestWatched(s);
     const head = await tmdb(`tv/${s.id}`);
+    // Ended with nothing scheduled: nothing can be upcoming, so no seasons.
+    if (/^(Ended|Canceled)$/.test(head.status || '') && !head.next_episode_to_air) return null;
     const all = (head.seasons || []).filter(x => x.season_number > 0)
       .map(x => x.season_number).sort((a, b) => a - b);
     const from = all.filter(n => n >= mark.season);
@@ -1620,7 +1722,15 @@ async function renderNext(v) {
   if (cached && !fresh) {
     const note = el('div', 'refreshing', 'Updating in the background…');
     v.prepend(note);
-    computeNext().then(() => { if (view === 'next') render(); }).catch(() => {});
+    // Right after a cold start the phone is busiest: let the app settle
+    // first. After a crash, don't run it automatically at all.
+    if (safeMode) {
+      const b = v.querySelector('.refreshing');
+      if (b) { b.textContent = 'Updating paused after a crash — tap to update'; b.onclick = () => { b.textContent = 'Updating…'; computeNext().then(() => { if (view === 'next') render(); }).catch(() => {}); }; }
+    } else {
+      setTimeout(() => computeNext().then(() => { if (view === 'next') render(); }).catch(() => {}),
+                 performance.now() < 10000 ? 4000 : 0);
+    }
   }
 }
 
@@ -3724,6 +3834,17 @@ async function runHealthCheck(out) {
     add(false, 'Rewatch migration missing', 'run rewatch_migration.sql — episode rewatches will not save');
   }
 
+  // 1a. the last launch Chrome killed, from the flight recorder
+  try {
+    const crash = JSON.parse(localStorage.getItem('mytv.lastcrash') || 'null');
+    if (crash && crash.s && crash.s.length) {
+      const last = crash.s[crash.s.length - 1];
+      const peak = Math.max(0, ...crash.s.map(x => x[1] || 0));
+      add(false, 'Last crash', `${new Date(crash.at).toLocaleString('en-GB')} (build ${crash.build}) — died ~${last[0]}s in, while doing "${last[5]}". ` +
+        `Memory ${last[1] != null ? last[1] + ' MB (peak ' + peak + ' MB)' : 'not reported'}, ${last[2]} requests (${last[3]} still open), ${last[4]} KB written to storage.`);
+    }
+  } catch { /* ignore */ }
+
   // 1b. how long did start-up take, and did any launch stall?
   try {
     const log = JSON.parse(localStorage.getItem('mytv.bootlog') || 'null');
@@ -3991,7 +4112,7 @@ function renderData(v) {
           const keys = await caches.keys();
           await Promise.all(keys.map(k => caches.delete(k)));
         }
-        Object.keys(localStorage).filter(k => k.startsWith('tmdb:') || k.startsWith('fb:')
+        Object.keys(localStorage).filter(k => k.startsWith('tmdb:') || k.startsWith('tvs:') || k.startsWith('fb:')
           || k.startsWith('fbfail:') || k === 'mytv.feeds').forEach(k => localStorage.removeItem(k));
       } catch { /* best effort */ }
       location.reload(true);
@@ -5504,7 +5625,7 @@ async function start() {
   render();
   bootPainted();
   afterBoot();
-  if (safeMode) setTimeout(() => toast('Recovered from a crash — heavy extras are paused for this launch'), 1200);
+  if (safeMode) setTimeout(() => toast('Recovered from a crash — heavy work paused. Details in Settings → Health check'), 1200);
   loadHistoryRest(() => { if (view === 'me' || meTab === 'journal') render(); });
   // Push an earned wrap-up once per app open, oldest first, like Streamlit does.
   // The new recap is the heaviest screen in the app, and launch is already the
@@ -5555,6 +5676,7 @@ async function healMissingArt() {
   ].filter(([k, it]) => due(`${k}:${it.id}`)).slice(0, 12);
   if (!items.length) return 0;
   let fixed = 0;
+  flight.task = 'artwork';
   await mapLimit(items, 3, async ([kind, it]) => {
     try { localStorage.setItem(`heal:${kind}:${it.id}`, String(Date.now())); } catch { /* ignore */ }
     const d = await tmdb(`${kind}/${it.id}`, {}, { fresh: true }).catch(() => null);
@@ -5610,7 +5732,10 @@ function bootPainted() {
     and hold more than it needed. A few at a time, never during start-up. */
 function purgeExpiredCache() {
   let keys;
-  try { keys = Object.keys(localStorage).filter(k => /^(tmdb|tvm|col):/.test(k)); } catch { return; }
+  try { keys = Object.keys(localStorage).filter(k => /^(tmdb|tvs|tvm|col):/.test(k)); } catch { return; }
+  // The old raw season bundles are never read any more: delete them outright.
+  keys.filter(k => k.includes('append_to_response=season')).forEach(k => { try { localStorage.removeItem(k); } catch { /* ignore */ } });
+  keys = keys.filter(k => !k.includes('append_to_response=season'));
   let i = 0, removed = 0;
   const slice = () => {
     const end = Math.min(keys.length, i + 40);
@@ -5625,7 +5750,24 @@ function purgeExpiredCache() {
   slice();
 }
 
+function startFlightRecorder() {
+  // A launch after a crash: keep the dead launch's recording before it's overwritten.
+  if (safeMode) {
+    try { const prev = localStorage.getItem('mytv.flight'); if (prev) localStorage.setItem('mytv.lastcrash', prev); } catch { /* ignore */ }
+  }
+  const t0 = Date.now(), samples = [];
+  const tick = () => {
+    const mem = performance && performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
+    samples.push([Math.round((Date.now() - t0) / 1000), mem, flight.req, flight.open, Math.round(flight.wroteKB), flight.task]);
+    if (samples.length > 30) samples.shift();
+    try { localStorage.setItem('mytv.flight', JSON.stringify({ at: t0, build: BUILD, s: samples })); } catch { /* ignore */ }
+    if (Date.now() - t0 < 60000) setTimeout(tick, 2000);
+  };
+  tick();
+}
+
 function boot() {
+  startFlightRecorder();
   try { window.history.replaceState({ mytv: true, kind: 'root', view: 'next' }, ''); } catch { /* ignore */ }
   cfg = JSON.parse(localStorage.getItem(CFG_KEY) || 'null');
   if (!cfg) { $('#setup').hidden = false; bootPainted(); return; }
@@ -5728,7 +5870,7 @@ if ('serviceWorker' in navigator) {
     if (h > 46) {
       buzz(15);
       bar.classList.add('busy');
-      Object.keys(localStorage).filter(k => k.startsWith('tmdb:') || k.startsWith('fbdb:'))
+      Object.keys(localStorage).filter(k => k.startsWith('tmdb:') || k.startsWith('tvs:') || k.startsWith('fbdb:'))
         .forEach(k => localStorage.removeItem(k));
       invalidateFeeds();          // stale, but still paints while refreshing
       try { await loadPayload(); await loadHistory(); } catch { /* offline */ }
